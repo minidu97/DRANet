@@ -1,0 +1,103 @@
+#====================== Model Training =======================================================
+    test_acc = []
+    test_acc_no_transfer =[]
+    saved_model_name = './result/' + source_dataset+'_to_' + target_dataset + '_best.pt'
+    for iter in range(1,iterations+1):
+
+        save_name = './model_saved/ADDA_EM_' + source_dataset + '_to_' + target_dataset +'_iter'+str(iter)
+
+        # create model
+        print('Create VGG16 model.................................................')
+        vgg16 = models.vgg16_bn()
+        print('vgg16.classifier[6].out_features=', vgg16.classifier[6].out_features) # 1000
+        vgg16.load_state_dict(torch.load("vgg16_bn.pth"))
+
+        # Newly created modules have require_grad=True by default
+        num_features = vgg16.classifier[6].in_features
+        features = list(vgg16.classifier.children())[:-1] # Remove last layer
+        features.extend([nn.Linear(num_features, len(class_names))]) # Add our layer with 4 outputs
+        vgg16.classifier = nn.Sequential(*features) # Replace the model classifier
+        if use_gpu: vgg16.cuda()  # .cuda() will move everything to the GPU side
+
+        # Create Models
+        src_encoder = vgg16.features
+        src_classifier = vgg16.classifier
+
+        # Create Discriminator
+        input_dims = src_classifier[0].in_features
+        netD = Discriminator(input_dims=input_dims, hidden_dims=500,output_dims=2).cuda()
+
+        if not enable_transfer:
+            print("No Transfer Learning")
+
+            source_encoder_name = save_name + '_source_encoder.pt'
+            source_cls_name = save_name + '_source_classifier.pt'
+            src_encoder.load_state_dict(torch.load(source_encoder_name))
+            src_classifier.load_state_dict(torch.load(source_cls_name))
+
+            # src_encoder,src_classifier = train_src(src_encoder,src_classifier,dataloader_s[TRAIN_S],dataloader_s[VAL_S],epochs,save_name)
+
+            print("Test scr_encoder + src_classifier on Source Test dataset")
+            test(src_encoder,src_classifier,dataloader_s[TEST_S], dataset_sizes_src[TEST_S])
+
+            print("Test scr_encoder + src_classifier on Target Test dataset")
+            acc = test(src_encoder, src_classifier, dataloader_t[TEST_T], dataset_sizes_tgt[TEST_T])
+            test_acc_no_transfer.append(acc)
+
+        if enable_transfer:
+
+            print("ADDA+EM Transfer Learning")
+            src_encoder, src_classifier = train_src(src_encoder, src_classifier, dataloader_s[TRAIN_S],
+                                                    dataloader_s[VAL_S], epochs, save_name)
+            #
+            # print("Test scr_encoder + src_classifier on Source Test dataset")
+            # test(src_encoder,src_classifier,dataloader_s[TEST_S], dataset_sizes_src[TEST_S])
+            #
+            # print("Test scr_encoder + src_classifier on Target Test dataset")
+            # test(src_encoder, src_classifier, dataloader_t[TEST_T], dataset_sizes_tgt[TEST_T])
+
+            source_encoder_name = save_name + '_source_encoder.pt'
+            source_cls_name = save_name + '_source_classifier.pt'
+            src_encoder.load_state_dict(torch.load(source_encoder_name))
+            src_classifier.load_state_dict(torch.load(source_cls_name))
+
+            # Freeze sournce encoder and classifier parameters
+            for param in src_encoder.parameters():
+                param.requires_grad = False
+            for param in src_classifier.parameters():
+                param.requires_grad = False
+
+            # Train target encoder by GAN
+            print("Training encoder for target domain...........................")
+
+            # create model
+            print('Create target encoder from VGG16 .............................')
+            vgg16_t = models.vgg16_bn()
+            if use_gpu: vgg16_t.cuda()  # .cuda() will move everything to the GPU side
+            tgt_encoder = vgg16_t.features
+            tgt_encoder.load_state_dict(src_encoder.state_dict())
+            # print(tgt_encoder)
+
+            # print("Test tgt_encoder + src_classifier on Target Test dataset")
+            # test(tgt_encoder, src_classifier, dataloader_t[TEST_T], dataset_sizes_tgt[TEST_T])
+
+            tgt_encoder = train_tgt(src_encoder,src_classifier,tgt_encoder,netD,dataloader_s[TRAIN_S],dataloader_t[TRAIN_T],save_name,epochs)
+
+            print("Test scr_encoder + src_classifier on Source Test dataset")
+            test(src_encoder,src_classifier,dataloader_s[TEST_S], dataset_sizes_src[TEST_S])
+
+            print("Test scr_encoder + src_classifier on Target Test dataset")
+            test(src_encoder, src_classifier, dataloader_t[TEST_T], dataset_sizes_tgt[TEST_T])
+
+            print("Test tgt_encoder + src_classifier on Target Test dataset")
+            tgt_acc = test(tgt_encoder, src_classifier, dataloader_t[TEST_T], dataset_sizes_tgt[TEST_T])
+            test_acc.append(tgt_acc)
+
+    if enable_transfer:
+        print('test_acc=', test_acc)
+        test_acc_avg = sum(test_acc) / len(test_acc)
+        test_acc_var = statistics.stdev(test_acc)
+        print("Average test acc: %.4f" % (test_acc_avg), '| Variance test: %.4f' % (test_acc_var))
+        print("The End")
+    else:
+        print("No transferrring test_acc = ", test_acc_no_transfer)
